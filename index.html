@@ -24,6 +24,8 @@
     .small{font-size:12px;color:#6b7280}.hidden{display:none}
     .progress-bar{width:100%;height:4px;background:#e5e7eb;border-radius:2px;margin-top:8px;overflow:hidden}
     .progress-fill{height:100%;background:#111827;width:0%;transition:width 0.3s}
+    .debug{background:#fef3c7;border:1px solid #fcd34d;padding:10px;border-radius:6px;margin-top:10px;font-size:11px;font-family:monospace;color:#78350f}
+    .toggle{cursor:pointer;padding:8px;margin-top:8px;background:#f3f4f6;border-radius:6px;font-size:12px}
   </style>
 </head>
 <body>
@@ -43,6 +45,8 @@
     <img id="preview" class="hidden" alt="Vista previa">
     <div id="status" class="status">Cargando catálogo...</div>
     <div id="progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
+    <div class="toggle" onclick="toggleDebug()">📊 Ver detalles OCR</div>
+    <div id="debug" class="debug hidden"></div>
   </section>
 
   <section class="card">
@@ -73,6 +77,7 @@ let catalog = [];
 let selectedFile = null;
 let inventory = JSON.parse(localStorage.getItem("lorcanaInventoryV1") || "[]");
 let isScanning = false;
+let debugMode = false;
 
 const $ = id => document.getElementById(id);
 const normalize = s => (s||"").toLowerCase()
@@ -91,14 +96,31 @@ function setProgress(percent) {
   }
 }
 
+function toggleDebug() {
+  debugMode = !debugMode;
+  const d = $("debug");
+  if(debugMode) {
+    d.classList.remove("hidden");
+  } else {
+    d.classList.add("hidden");
+  }
+}
+
+function log(msg) {
+  console.log("[Lorcana Scanner]", msg);
+  if(debugMode) {
+    $("debug").innerHTML += msg + "<br>";
+  }
+}
+
 async function loadCatalog(){
   try{
-    console.log("Cargando catálogo desde: " + CATALOG_FILE);
+    log("Cargando catálogo desde: " + CATALOG_FILE);
     setStatus("📥 Cargando catálogo...");
     setProgress(30);
 
     const response = await fetch(CATALOG_FILE);
-    if(!response.ok) throw new Error(`HTTP ${response.status} - ¿Está allCards.json en el repositorio?`);
+    if(!response.ok) throw new Error(`HTTP ${response.status}`);
     
     setProgress(60);
     const data = await response.json();
@@ -110,17 +132,59 @@ async function loadCatalog(){
       throw new Error("El catálogo no contiene cartas");
     }
     
-    console.log(`✓ Catálogo cargado: ${catalog.length} cartas`);
+    log(`✓ Catálogo cargado: ${catalog.length} cartas`);
     setProgress(100);
     setTimeout(() => setProgress(0), 500);
     
     setStatus(`✓ Catálogo listo: ${catalog.length} cartas.\n\nSelecciona una foto y toca Escanear.`);
 
   }catch(e){
-    console.error("Error en loadCatalog:", e);
+    log("Error en loadCatalog: " + e.message);
     setProgress(0);
-    setStatus(`❌ Error al cargar catálogo:\n${e.message}\n\nAsegúrate de que allCards.json está en el repositorio.`);
+    setStatus(`❌ Error al cargar catálogo:\n${e.message}`);
   }
+}
+
+// Preprocesamiento de imagen para mejorar OCR
+async function preprocessImage(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext("2d");
+      
+      // Dibujar imagen original
+      ctx.drawImage(img, 0, 0);
+      
+      // Obtener datos de píxeles
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const data = imageData.data;
+      
+      // Conversión a escala de grises + aumento de contraste
+      for(let i = 0; i < data.length; i += 4) {
+        const r = data[i];
+        const g = data[i + 1];
+        const b = data[i + 2];
+        
+        // Escala de grises (luminancia)
+        let gray = 0.299 * r + 0.587 * g + 0.114 * b;
+        
+        // Aumento de contraste (gamma correction)
+        gray = Math.pow(gray / 255, 0.5) * 255;
+        
+        data[i] = gray;      // R
+        data[i + 1] = gray;  // G
+        data[i + 2] = gray;  // B
+      }
+      
+      ctx.putImageData(imageData, 0, 0);
+      canvas.toBlob(resolve, "image/jpeg", 0.95);
+    };
+    img.onerror = reject;
+    img.src = URL.createObjectURL(file);
+  });
 }
 
 $("photo").addEventListener("change", e=>{
@@ -188,28 +252,30 @@ async function scan(){
     setStatus("📤 Preparando foto...");
     setProgress(20);
     
-    const base64 = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result.split(',')[1]);
-      reader.onerror = reject;
-      reader.readAsDataURL(selectedFile);
-    });
-
+    log("Iniciando preprocesamiento de imagen...");
+    const processedBlob = await preprocessImage(selectedFile);
+    log("✓ Imagen preprocesada (escala de grises + contraste)");
+    
     setStatus("🔍 Procesando OCR con Tesseract.js...");
     setProgress(30);
 
-    // Usar Tesseract.js correctamente
-    const { data } = await Tesseract.recognize(selectedFile, "eng", {
+    // Configuración mejorada de Tesseract.js
+    const { data } = await Tesseract.recognize(processedBlob, "eng", {
       logger: (m) => {
         if(m.status === "recognizing text") {
           const progress = Math.min(90, 30 + Math.round((m.progress || 0) * 60));
           setProgress(progress);
+          log(`OCR: ${Math.round((m.progress || 0) * 100)}%`);
         }
+      },
+      tessedit_pageseg_mode: Tesseract.PSM.AUTO,
+      tesseract_config_values: {
+        tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 -'"
       }
     });
 
     const text = (data.text || "").trim();
-    console.log("Texto OCR:", text);
+    log("Texto OCR (raw): " + text.substring(0, 100));
     
     if(!text) {
       setProgress(0);
@@ -227,7 +293,7 @@ async function scan(){
       .slice(0,8);
 
     setProgress(90);
-    console.log(`Coincidencias encontradas: ${ranked.length}`);
+    log(`✓ Coincidencias encontradas: ${ranked.length}`);
     renderResults(ranked, text);
     
     setProgress(100);
@@ -237,7 +303,8 @@ async function scan(){
 
   } catch(e) {
     setProgress(0);
-    console.error("Error en scan:", e);
+    log("ERROR en scan: " + e.message);
+    console.error(e);
     setStatus(`❌ Error:\n${e.message}`);
   } finally {
     isScanning = false;
@@ -256,6 +323,7 @@ function confirmCard(card){
   });
   localStorage.setItem("lorcanaInventoryV1",JSON.stringify(inventory));
   updateInventory();
+  log("Carta confirmada: " + cardLabel(card));
 }
 
 function updateInventory(){
