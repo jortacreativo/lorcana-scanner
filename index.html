@@ -17,7 +17,7 @@
     input[type=file]{display:none}
     .actions{display:flex;gap:10px;flex-wrap:wrap}
     #preview{width:100%;max-height:55vh;object-fit:contain;background:#111827;border-radius:12px;margin-top:12px}
-    .status{font-size:14px;margin-top:10px;white-space:pre-wrap}
+    .status{font-size:14px;margin-top:10px;white-space:pre-wrap;line-height:1.4}
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
     .result{border:1px solid #e5e7eb;border-radius:14px;padding:12px;background:#fff}
     .result img{width:100%;aspect-ratio:0.69;object-fit:cover;border-radius:9px;background:#eee}
@@ -25,6 +25,7 @@
     .small{font-size:12px;color:#6b7280}.hidden{display:none}
     .spinner{display:inline-block;width:14px;height:14px;border:2px solid #ddd;border-top-color:#111827;border-radius:50%;animation:spin .7s linear infinite}
     @keyframes spin{to{transform:rotate(360deg)}}
+    .info{background:#dbeafe;border-left:4px solid #0284c7;padding:12px;border-radius:6px;margin-bottom:12px;font-size:13px}
   </style>
 </head>
 <body>
@@ -62,18 +63,18 @@
   </section>
 </main>
 
-<script src="https://docs.opencv.org/4.x/opencv.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 const CATALOG_URL = "https://lorcanajson.org/files/current/en/allCards.json";
+const OCR_API = "https://api.ocr.space/parse";
+
 let catalog = [];
 let selectedFile = null;
 let inventory = JSON.parse(localStorage.getItem("lorcanaInventoryV1") || "[]");
 
 const $ = id => document.getElementById(id);
 const normalize = s => (s||"").toLowerCase()
-  .normalize("NFD").replace(/[\\u0300-\\u036f]/g,"")
-  .replace(/[^a-z0-9\\s-]/g," ").replace(/\\s+/g," ").trim();
+  .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
+  .replace(/[^a-z0-9\s-]/g," ").replace(/\s+/g," ").trim();
 
 function setStatus(text){ $("status").textContent = text; }
 
@@ -84,9 +85,9 @@ async function loadCatalog(){
     if(!r.ok) throw new Error("No se pudo descargar el catálogo.");
     const data = await r.json();
     catalog = data.cards || [];
-    setStatus(`Catálogo listo: ${catalog.length} cartas.`);
+    setStatus(`✓ Catálogo listo: ${catalog.length} cartas.`);
   }catch(e){
-    setStatus("No se pudo cargar el catálogo automáticamente. Revisa tu conexión y vuelve a cargar la página.\\n" + e.message);
+    setStatus("❌ Error al cargar el catálogo.\nRevisa tu conexión y recarga la página.\n\n" + e.message);
   }
 }
 
@@ -96,7 +97,7 @@ $("photo").addEventListener("change", e=>{
   $("preview").src = URL.createObjectURL(selectedFile);
   $("preview").classList.remove("hidden");
   $("scan").disabled = false;
-  setStatus("Foto lista. Pulsa Escanear.");
+  setStatus("✓ Foto lista. Pulsa Escanear.");
 });
 
 function tokenScore(text, card){
@@ -124,7 +125,7 @@ function cardLabel(card){
 function renderResults(matches, ocrText){
   $("results").innerHTML = "";
   if(!matches.length){
-    $("results").innerHTML = `<div class="small">No hubo coincidencias claras. Texto detectado: ${escapeHtml(ocrText)}</div>`;
+    $("results").innerHTML = `<div class="small">No hubo coincidencias claras.\n\nTexto detectado:\n${escapeHtml(ocrText)}</div>`;
     return;
   }
   for(const m of matches){
@@ -151,21 +152,51 @@ function escapeHtml(s){
 async function scan(){
   if(!selectedFile || !catalog.length) return;
   $("scan").disabled = true;
-  setStatus("Analizando texto de la foto…");
+  setStatus("📤 Enviando foto a OCR…");
   try{
-    const { data } = await Tesseract.recognize(selectedFile, "eng", {
-      logger: x => {
-        if(x.status === "recognizing text") setStatus(`OCR: ${Math.round((x.progress||0)*100)}%`);
-      }
+    // Convertir archivo a Base64
+    const base64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64String = reader.result.split(',')[1];
+        resolve(base64String);
+      };
+      reader.onerror = reject;
+      reader.readAsDataURL(selectedFile);
     });
-    const text = data.text || "";
-    setStatus("Buscando coincidencias en el catálogo…");
-    const ranked = catalog.map(card=>({card,score:tokenScore(text,card)}))
-      .filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0,8);
-    renderResults(ranked,text);
-    setStatus(`Listo. Texto detectado:\\n${text.trim() || "(sin texto)"}`);
+
+    // Llamar a OCR.space API
+    const formData = new FormData();
+    formData.append('base64Image', 'data:image/jpeg;base64,' + base64);
+    formData.append('language', 'eng');
+    formData.append('apikey', 'K87899142C');
+
+    setStatus("🔍 Procesando OCR…");
+    const response = await fetch(OCR_API, {
+      method: 'POST',
+      body: formData
+    });
+
+    const result = await response.json();
+    
+    if(!result.IsErroredOnProcessing) {
+      const text = result.ParsedText || "";
+      setStatus("🔎 Buscando coincidencias en el catálogo…");
+      
+      const ranked = catalog
+        .map(card=>({card,score:tokenScore(text,card)}))
+        .filter(x=>x.score>0)
+        .sort((a,b)=>b.score-a.score)
+        .slice(0,8);
+      
+      renderResults(ranked, text);
+      setStatus(`✓ Listo.\n\nTexto detectado:\n${text.trim() || "(sin texto detectado)"}`);
+    } else {
+      setStatus(`❌ Error en OCR: ${result.ErrorMessage || "desconocido"}`);
+    }
   }catch(e){
-    setStatus("Error durante el escaneo: " + e.message);
+    setStatus(`❌ Error durante el escaneo:\n${e.message}\n\nRevisa tu conexión e intenta de nuevo.`);
+    console.error(e);
   }finally{
     $("scan").disabled = false;
   }
@@ -191,7 +222,7 @@ function updateInventory(){
 $("scan").addEventListener("click",scan);
 $("clear").addEventListener("click",()=>{
   selectedFile=null;$("photo").value="";$("preview").classList.add("hidden");$("results").innerHTML="";
-  setStatus(catalog.length ? `Catálogo listo: ${catalog.length} cartas.` : "Cargando catálogo…");
+  setStatus(catalog.length ? `✓ Catálogo listo: ${catalog.length} cartas.` : "Cargando catálogo…");
 });
 $("resetInventory").addEventListener("click",()=>{
   if(confirm("¿Borrar el inventario local?")){
@@ -200,7 +231,7 @@ $("resetInventory").addEventListener("click",()=>{
 });
 $("export").addEventListener("click",()=>{
   const rows=[["name","set","number","rarity","addedAt"],...inventory.map(x=>[x.name,x.set,x.number,x.rarity,x.addedAt])];
-  const csv=rows.map(r=>r.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\\n");
+  const csv=rows.map(r=>r.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\n");
   const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
   a.download="lorcana-inventory-v1.csv";a.click();
 });
