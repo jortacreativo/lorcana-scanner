@@ -22,6 +22,8 @@
     .result img{width:100%;aspect-ratio:0.69;object-fit:cover;border-radius:9px;background:#eee}
     .confidence{font-weight:800;margin:7px 0}.green{color:#15803d}.yellow{color:#a16207}.red{color:#b91c1c}
     .small{font-size:12px;color:#6b7280}.hidden{display:none}
+    .progress-bar{width:100%;height:4px;background:#e5e7eb;border-radius:2px;margin-top:8px;overflow:hidden}
+    .progress-fill{height:100%;background:#111827;width:0%;transition:width 0.3s}
   </style>
 </head>
 <body>
@@ -39,7 +41,8 @@
       <button id="clear" class="secondary">Limpiar</button>
     </div>
     <img id="preview" class="hidden" alt="Vista previa">
-    <div id="status" class="status">Cargando catálogo...</div>
+    <div id="status" class="status">Inicializando...</div>
+    <div id="progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
   </section>
 
   <section class="card">
@@ -60,9 +63,9 @@
 </main>
 
 <script>
-// Usar CORS proxy para acceder al catálogo
-const CATALOG_URL = "https://api.allorigins.win/raw?url=https://lorcanajson.org/files/current/en/allCards.json";
 const OCR_API = "https://api.ocr.space/parse";
+const CATALOG_CACHE_KEY = "lorcana_catalog_v1";
+const CATALOG_URL = "https://api.allorigins.win/raw?url=https://lorcanajson.org/files/current/en/allCards.json";
 
 let catalog = [];
 let selectedFile = null;
@@ -76,18 +79,63 @@ const normalize = s => (s||"").toLowerCase()
 
 function setStatus(text) { $("status").textContent = text; }
 
+function setProgress(percent) {
+  const bar = $("progress");
+  if(percent <= 0) {
+    bar.classList.add("hidden");
+  } else {
+    bar.classList.remove("hidden");
+    bar.querySelector(".progress-fill").style.width = percent + "%";
+  }
+}
+
 async function loadCatalog(){
   try{
-    setStatus("📥 Descargando catálogo Lorcana...");
-    const r = await fetch(CATALOG_URL);
-    if(!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
+    // Primero intenta cargar desde cache
+    const cached = localStorage.getItem(CATALOG_CACHE_KEY);
+    if(cached) {
+      console.log("Catálogo cargado desde cache local");
+      catalog = JSON.parse(cached);
+      setStatus(`✓ Catálogo listo (cached): ${catalog.length} cartas.\n\nSelecciona una foto y toca Escanear.`);
+      return;
+    }
+
+    // Si no hay cache, descarga
+    console.log("Descargando catálogo...");
+    setStatus("📥 Descargando catálogo Lorcana (primera vez)...");
+    setProgress(10);
+
+    const response = await fetch(CATALOG_URL);
+    if(!response.ok) throw new Error(`HTTP ${response.status}`);
+    
+    setProgress(50);
+    const data = await response.json();
     catalog = data.cards || [];
-    console.log(`✓ Catálogo cargado: ${catalog.length} cartas`);
+    
+    setProgress(80);
+    
+    // Guardar en cache
+    localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify(catalog));
+    console.log(`✓ Catálogo descargado y cacheado: ${catalog.length} cartas`);
+    
+    setProgress(100);
+    setTimeout(() => setProgress(0), 500);
+    
     setStatus(`✓ Catálogo listo: ${catalog.length} cartas.\n\nSelecciona una foto y toca Escanear.`);
+
   }catch(e){
     console.error("Error en loadCatalog:", e);
-    setStatus("❌ Error al cargar catálogo.\nRevisa tu conexión.\n" + e.message);
+    setProgress(0);
+    setStatus(`❌ Error al descargar catálogo.\n${e.message}\n\nIntentando usar versión anterior cacheada...`);
+    
+    // Intenta cargar versión anterior cacheada
+    const old = localStorage.getItem(CATALOG_CACHE_KEY);
+    if(old) {
+      catalog = JSON.parse(old);
+      setStatus(`⚠️ Usando catálogo cacheado: ${catalog.length} cartas.\n(Sin conexión o servidor no disponible)`);
+    } else {
+      setStatus("❌ No hay catálogo disponible.\nRevisa tu conexión e intenta recargar la página.");
+    }
   }
 }
 
@@ -154,6 +202,7 @@ async function scan(){
   
   try {
     setStatus("📤 Preparando foto...");
+    setProgress(20);
     
     const base64 = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -163,6 +212,7 @@ async function scan(){
     });
 
     setStatus("🔍 Procesando OCR (5-10 segundos)...");
+    setProgress(40);
 
     const formData = new FormData();
     formData.append('base64Image', 'data:image/jpeg;base64,' + base64);
@@ -172,8 +222,11 @@ async function scan(){
     const response = await fetch(OCR_API, { method: 'POST', body: formData });
     const result = await response.json();
     
+    setProgress(70);
+    
     if(result.IsErroredOnProcessing) {
       console.error("OCR Error:", result.ErrorMessage);
+      setProgress(0);
       setStatus(`❌ Error OCR:\n${result.ErrorMessage}`);
       return;
     }
@@ -188,11 +241,17 @@ async function scan(){
       .sort((a,b)=>b.score-a.score)
       .slice(0,8);
 
+    setProgress(90);
     console.log(`Coincidencias encontradas: ${ranked.length}`);
     renderResults(ranked, text);
+    
+    setProgress(100);
+    setTimeout(() => setProgress(0), 500);
+    
     setStatus(`✓ Listo.\n\nTexto detectado:\n${text.trim().substring(0,200)}`);
 
   } catch(e) {
+    setProgress(0);
     console.error("Error en scan:", e);
     setStatus(`❌ Error:\n${e.message}`);
   } finally {
@@ -221,6 +280,7 @@ function updateInventory(){
 $("scan").addEventListener("click", scan);
 $("clear").addEventListener("click",()=>{
   selectedFile=null; $("photo").value=""; $("preview").classList.add("hidden"); $("results").innerHTML="";
+  setProgress(0);
   setStatus(catalog.length ? `✓ Catálogo: ${catalog.length} cartas.` : "Cargando...");
 });
 $("resetInventory").addEventListener("click",()=>{
