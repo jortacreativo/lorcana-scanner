@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <title>Lorcana Scanner V1</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    *{box-sizing:border-box} body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f4f6;color:#111827}
+    header{background:#111827;color:white;padding:18px 16px;position:sticky;top:0;z-index:10}
+    header h1{font-size:20px;margin:0 0 4px} header p{margin:0;font-size:13px;opacity:.8}
+    main{max-width:900px;margin:auto;padding:16px}
+    .card{background:white;border-radius:16px;padding:16px;margin-bottom:16px;box-shadow:0 2px 12px #00000010}
+    button,.file-label{border:0;border-radius:12px;padding:12px 15px;font-weight:700;cursor:pointer;background:#111827;color:white;display:inline-block}
+    button.secondary{background:#e5e7eb;color:#111827} button:disabled{opacity:.5;cursor:not-allowed}
+    input[type=file]{display:none}
+    .actions{display:flex;gap:10px;flex-wrap:wrap}
+    #preview{width:100%;max-height:55vh;object-fit:contain;background:#111827;border-radius:12px;margin-top:12px}
+    .status{font-size:14px;margin-top:10px;white-space:pre-wrap}
+    .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+    .result{border:1px solid #e5e7eb;border-radius:14px;padding:12px;background:#fff}
+    .result img{width:100%;aspect-ratio:0.69;object-fit:cover;border-radius:9px;background:#eee}
+    .confidence{font-weight:800;margin:7px 0}.green{color:#15803d}.yellow{color:#a16207}.red{color:#b91c1c}
+    .small{font-size:12px;color:#6b7280}.hidden{display:none}
+    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #ddd;border-top-color:#111827;border-radius:50%;animation:spin .7s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<header>
+  <h1>🃏 Lorcana Scanner V1</h1>
+  <p>Prototipo gratuito: foto → OCR → búsqueda en catálogo</p>
+</header>
+
+<main>
+  <section class="card">
+    <div class="actions">
+      <label class="file-label" for="photo">📷 Tomar / elegir foto</label>
+      <input id="photo" type="file" accept="image/*" capture="environment">
+      <button id="scan" disabled>🔎 Escanear</button>
+      <button id="clear" class="secondary">Limpiar</button>
+    </div>
+    <img id="preview" class="hidden" alt="Vista previa">
+    <div id="status" class="status">Carga el catálogo y luego selecciona una foto.</div>
+  </section>
+
+  <section class="card">
+    <strong>Resultados</strong>
+    <p class="small">V1 prioriza reducir trabajo manual. Las coincidencias se muestran como candidatos; confirma las de confianza baja.</p>
+    <div id="results" class="grid"></div>
+  </section>
+
+  <section class="card">
+    <strong>Inventario local</strong>
+    <p class="small">Las cartas confirmadas se guardan en este navegador. No se suben a un servidor.</p>
+    <div class="actions">
+      <button id="export" class="secondary">⬇️ Exportar CSV</button>
+      <button id="resetInventory" class="secondary">Borrar inventario</button>
+    </div>
+    <div id="inventorySummary" class="status"></div>
+  </section>
+</main>
+
+<script src="https://docs.opencv.org/4.x/opencv.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script>
+const CATALOG_URL = "https://lorcanajson.org/files/current/en/allCards.json";
+let catalog = [];
+let selectedFile = null;
+let inventory = JSON.parse(localStorage.getItem("lorcanaInventoryV1") || "[]");
+
+const $ = id => document.getElementById(id);
+const normalize = s => (s||"").toLowerCase()
+  .normalize("NFD").replace(/[\\u0300-\\u036f]/g,"")
+  .replace(/[^a-z0-9\\s-]/g," ").replace(/\\s+/g," ").trim();
+
+function setStatus(text){ $("status").textContent = text; }
+
+async function loadCatalog(){
+  try{
+    setStatus("Cargando catálogo Lorcana…");
+    const r = await fetch(CATALOG_URL);
+    if(!r.ok) throw new Error("No se pudo descargar el catálogo.");
+    const data = await r.json();
+    catalog = data.cards || [];
+    setStatus(`Catálogo listo: ${catalog.length} cartas.`);
+  }catch(e){
+    setStatus("No se pudo cargar el catálogo automáticamente. Revisa tu conexión y vuelve a cargar la página.\\n" + e.message);
+  }
+}
+
+$("photo").addEventListener("change", e=>{
+  selectedFile = e.target.files[0];
+  if(!selectedFile) return;
+  $("preview").src = URL.createObjectURL(selectedFile);
+  $("preview").classList.remove("hidden");
+  $("scan").disabled = false;
+  setStatus("Foto lista. Pulsa Escanear.");
+});
+
+function tokenScore(text, card){
+  const hay = normalize([
+    card.fullName, card.simpleName, card.name, card.title,
+    card.setName, card.number, card.collectorNumber
+  ].filter(Boolean).join(" "));
+  const tokens = normalize(text).split(" ").filter(x=>x.length>2);
+  if(!tokens.length) return 0;
+  let hits = 0;
+  for(const t of tokens){
+    if(hay.includes(t)) hits++;
+  }
+  return hits / tokens.length;
+}
+
+function getImage(card){
+  return card?.images?.full || card?.images?.thumbnail || card?.imageUrl || "";
+}
+
+function cardLabel(card){
+  return card.fullName || card.simpleName || card.name || "Carta Lorcana";
+}
+
+function renderResults(matches, ocrText){
+  $("results").innerHTML = "";
+  if(!matches.length){
+    $("results").innerHTML = `<div class="small">No hubo coincidencias claras. Texto detectado: ${escapeHtml(ocrText)}</div>`;
+    return;
+  }
+  for(const m of matches){
+    const div = document.createElement("div");
+    div.className = "result";
+    const pct = Math.round(m.score*100);
+    const cls = pct >= 80 ? "green" : pct >= 55 ? "yellow" : "red";
+    div.innerHTML = `
+      ${getImage(m.card) ? `<img src="${getImage(m.card)}" loading="lazy" alt="">` : ""}
+      <div class="confidence ${cls}">${pct}% coincidencia</div>
+      <strong>${escapeHtml(cardLabel(m.card))}</strong>
+      <div class="small">${escapeHtml(m.card.setName || m.card.set?.name || "")} · #${escapeHtml(String(m.card.number || ""))}</div>
+      <button style="margin-top:9px;width:100%" data-id="${escapeHtml(String(m.card.id || m.card.culture_invariant_id || cardLabel(m.card)))}">✓ Confirmar</button>
+    `;
+    div.querySelector("button").addEventListener("click", ()=>confirmCard(m.card));
+    $("results").appendChild(div);
+  }
+}
+
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+}
+
+async function scan(){
+  if(!selectedFile || !catalog.length) return;
+  $("scan").disabled = true;
+  setStatus("Analizando texto de la foto…");
+  try{
+    const { data } = await Tesseract.recognize(selectedFile, "eng", {
+      logger: x => {
+        if(x.status === "recognizing text") setStatus(`OCR: ${Math.round((x.progress||0)*100)}%`);
+      }
+    });
+    const text = data.text || "";
+    setStatus("Buscando coincidencias en el catálogo…");
+    const ranked = catalog.map(card=>({card,score:tokenScore(text,card)}))
+      .filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0,8);
+    renderResults(ranked,text);
+    setStatus(`Listo. Texto detectado:\\n${text.trim() || "(sin texto)"}`);
+  }catch(e){
+    setStatus("Error durante el escaneo: " + e.message);
+  }finally{
+    $("scan").disabled = false;
+  }
+}
+
+function confirmCard(card){
+  inventory.push({
+    id: card.id || card.culture_invariant_id || "",
+    name: cardLabel(card),
+    set: card.setName || card.set?.name || "",
+    number: card.number || "",
+    rarity: card.rarity || "",
+    addedAt: new Date().toISOString()
+  });
+  localStorage.setItem("lorcanaInventoryV1",JSON.stringify(inventory));
+  updateInventory();
+}
+
+function updateInventory(){
+  $("inventorySummary").textContent = `${inventory.length} cartas registradas en este navegador.`;
+}
+
+$("scan").addEventListener("click",scan);
+$("clear").addEventListener("click",()=>{
+  selectedFile=null;$("photo").value="";$("preview").classList.add("hidden");$("results").innerHTML="";
+  setStatus(catalog.length ? `Catálogo listo: ${catalog.length} cartas.` : "Cargando catálogo…");
+});
+$("resetInventory").addEventListener("click",()=>{
+  if(confirm("¿Borrar el inventario local?")){
+    inventory=[];localStorage.removeItem("lorcanaInventoryV1");updateInventory();
+  }
+});
+$("export").addEventListener("click",()=>{
+  const rows=[["name","set","number","rarity","addedAt"],...inventory.map(x=>[x.name,x.set,x.number,x.rarity,x.addedAt])];
+  const csv=rows.map(r=>r.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\\n");
+  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="lorcana-inventory-v1.csv";a.click();
+});
+updateInventory();
+loadCatalog();
+</script>
+</body>
+</html>
