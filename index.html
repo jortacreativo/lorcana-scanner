@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#111827">
   <title>Lorcana Scanner V1</title>
-  <link rel="manifest" href="manifest.json">
   <style>
     *{box-sizing:border-box} body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f3f4f6;color:#111827}
     header{background:#111827;color:white;padding:18px 16px;position:sticky;top:0;z-index:10}
@@ -17,15 +16,12 @@
     input[type=file]{display:none}
     .actions{display:flex;gap:10px;flex-wrap:wrap}
     #preview{width:100%;max-height:55vh;object-fit:contain;background:#111827;border-radius:12px;margin-top:12px}
-    .status{font-size:14px;margin-top:10px;white-space:pre-wrap;line-height:1.4}
+    .status{font-size:14px;margin-top:10px;white-space:pre-wrap;line-height:1.4;background:#f9fafb;padding:12px;border-radius:8px;border-left:3px solid #111827}
     .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
     .result{border:1px solid #e5e7eb;border-radius:14px;padding:12px;background:#fff}
     .result img{width:100%;aspect-ratio:0.69;object-fit:cover;border-radius:9px;background:#eee}
     .confidence{font-weight:800;margin:7px 0}.green{color:#15803d}.yellow{color:#a16207}.red{color:#b91c1c}
     .small{font-size:12px;color:#6b7280}.hidden{display:none}
-    .spinner{display:inline-block;width:14px;height:14px;border:2px solid #ddd;border-top-color:#111827;border-radius:50%;animation:spin .7s linear infinite}
-    @keyframes spin{to{transform:rotate(360deg)}}
-    .info{background:#dbeafe;border-left:4px solid #0284c7;padding:12px;border-radius:6px;margin-bottom:12px;font-size:13px}
   </style>
 </head>
 <body>
@@ -43,18 +39,18 @@
       <button id="clear" class="secondary">Limpiar</button>
     </div>
     <img id="preview" class="hidden" alt="Vista previa">
-    <div id="status" class="status">Carga el catálogo y luego selecciona una foto.</div>
+    <div id="status" class="status">Cargando catálogo...</div>
   </section>
 
   <section class="card">
     <strong>Resultados</strong>
-    <p class="small">V1 prioriza reducir trabajo manual. Las coincidencias se muestran como candidatos; confirma las de confianza baja.</p>
+    <p class="small">Coincidencias detectadas. Confirma las que te interesen.</p>
     <div id="results" class="grid"></div>
   </section>
 
   <section class="card">
     <strong>Inventario local</strong>
-    <p class="small">Las cartas confirmadas se guardan en este navegador. No se suben a un servidor.</p>
+    <p class="small">Las cartas se guardan en este navegador. No se envían a servidor.</p>
     <div class="actions">
       <button id="export" class="secondary">⬇️ Exportar CSV</button>
       <button id="resetInventory" class="secondary">Borrar inventario</button>
@@ -64,30 +60,34 @@
 </main>
 
 <script>
-const CATALOG_URL = "https://lorcanajson.org/files/current/en/allCards.json";
+// Usar CORS proxy para acceder al catálogo
+const CATALOG_URL = "https://api.allorigins.win/raw?url=https://lorcanajson.org/files/current/en/allCards.json";
 const OCR_API = "https://api.ocr.space/parse";
 
 let catalog = [];
 let selectedFile = null;
 let inventory = JSON.parse(localStorage.getItem("lorcanaInventoryV1") || "[]");
+let isScanning = false;
 
 const $ = id => document.getElementById(id);
 const normalize = s => (s||"").toLowerCase()
   .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
   .replace(/[^a-z0-9\s-]/g," ").replace(/\s+/g," ").trim();
 
-function setStatus(text){ $("status").textContent = text; }
+function setStatus(text) { $("status").textContent = text; }
 
 async function loadCatalog(){
   try{
-    setStatus("Cargando catálogo Lorcana…");
+    setStatus("📥 Descargando catálogo Lorcana...");
     const r = await fetch(CATALOG_URL);
-    if(!r.ok) throw new Error("No se pudo descargar el catálogo.");
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     catalog = data.cards || [];
-    setStatus(`✓ Catálogo listo: ${catalog.length} cartas.`);
+    console.log(`✓ Catálogo cargado: ${catalog.length} cartas`);
+    setStatus(`✓ Catálogo listo: ${catalog.length} cartas.\n\nSelecciona una foto y toca Escanear.`);
   }catch(e){
-    setStatus("❌ Error al cargar el catálogo.\nRevisa tu conexión y recarga la página.\n\n" + e.message);
+    console.error("Error en loadCatalog:", e);
+    setStatus("❌ Error al cargar catálogo.\nRevisa tu conexión.\n" + e.message);
   }
 }
 
@@ -108,9 +108,7 @@ function tokenScore(text, card){
   const tokens = normalize(text).split(" ").filter(x=>x.length>2);
   if(!tokens.length) return 0;
   let hits = 0;
-  for(const t of tokens){
-    if(hay.includes(t)) hits++;
-  }
+  for(const t of tokens) if(hay.includes(t)) hits++;
   return hits / tokens.length;
 }
 
@@ -122,10 +120,14 @@ function cardLabel(card){
   return card.fullName || card.simpleName || card.name || "Carta Lorcana";
 }
 
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
+}
+
 function renderResults(matches, ocrText){
   $("results").innerHTML = "";
   if(!matches.length){
-    $("results").innerHTML = `<div class="small">No hubo coincidencias claras.\n\nTexto detectado:\n${escapeHtml(ocrText)}</div>`;
+    $("results").innerHTML = `<div class="small">Sin coincidencias claras.\n\nTexto detectado:\n${escapeHtml(ocrText.substring(0,300))}</div>`;
     return;
   }
   for(const m of matches){
@@ -135,78 +137,75 @@ function renderResults(matches, ocrText){
     const cls = pct >= 80 ? "green" : pct >= 55 ? "yellow" : "red";
     div.innerHTML = `
       ${getImage(m.card) ? `<img src="${getImage(m.card)}" loading="lazy" alt="">` : ""}
-      <div class="confidence ${cls}">${pct}% coincidencia</div>
+      <div class="confidence ${cls}">${pct}%</div>
       <strong>${escapeHtml(cardLabel(m.card))}</strong>
-      <div class="small">${escapeHtml(m.card.setName || m.card.set?.name || "")} · #${escapeHtml(String(m.card.number || ""))}</div>
-      <button style="margin-top:9px;width:100%" data-id="${escapeHtml(String(m.card.id || m.card.culture_invariant_id || cardLabel(m.card)))}">✓ Confirmar</button>
+      <div class="small">${escapeHtml(m.card.setName || "")} #${escapeHtml(String(m.card.number || ""))}</div>
+      <button style="margin-top:9px;width:100%">✓ Confirmar</button>
     `;
     div.querySelector("button").addEventListener("click", ()=>confirmCard(m.card));
     $("results").appendChild(div);
   }
 }
 
-function escapeHtml(s){
-  return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
-}
-
 async function scan(){
-  if(!selectedFile || !catalog.length) return;
+  if(isScanning || !selectedFile || !catalog.length) return;
+  isScanning = true;
   $("scan").disabled = true;
-  setStatus("📤 Enviando foto a OCR…");
-  try{
-    // Convertir archivo a Base64
+  
+  try {
+    setStatus("📤 Preparando foto...");
+    
     const base64 = await new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => {
-        const base64String = reader.result.split(',')[1];
-        resolve(base64String);
-      };
+      reader.onload = () => resolve(reader.result.split(',')[1]);
       reader.onerror = reject;
       reader.readAsDataURL(selectedFile);
     });
 
-    // Llamar a OCR.space API
+    setStatus("🔍 Procesando OCR (5-10 segundos)...");
+
     const formData = new FormData();
     formData.append('base64Image', 'data:image/jpeg;base64,' + base64);
     formData.append('language', 'eng');
     formData.append('apikey', 'K87899142C');
 
-    setStatus("🔍 Procesando OCR…");
-    const response = await fetch(OCR_API, {
-      method: 'POST',
-      body: formData
-    });
-
+    const response = await fetch(OCR_API, { method: 'POST', body: formData });
     const result = await response.json();
     
-    if(!result.IsErroredOnProcessing) {
-      const text = result.ParsedText || "";
-      setStatus("🔎 Buscando coincidencias en el catálogo…");
-      
-      const ranked = catalog
-        .map(card=>({card,score:tokenScore(text,card)}))
-        .filter(x=>x.score>0)
-        .sort((a,b)=>b.score-a.score)
-        .slice(0,8);
-      
-      renderResults(ranked, text);
-      setStatus(`✓ Listo.\n\nTexto detectado:\n${text.trim() || "(sin texto detectado)"}`);
-    } else {
-      setStatus(`❌ Error en OCR: ${result.ErrorMessage || "desconocido"}`);
+    if(result.IsErroredOnProcessing) {
+      console.error("OCR Error:", result.ErrorMessage);
+      setStatus(`❌ Error OCR:\n${result.ErrorMessage}`);
+      return;
     }
-  }catch(e){
-    setStatus(`❌ Error durante el escaneo:\n${e.message}\n\nRevisa tu conexión e intenta de nuevo.`);
-    console.error(e);
-  }finally{
+
+    const text = result.ParsedText || "";
+    console.log("Texto OCR:", text);
+    setStatus("🔎 Buscando en catálogo...");
+
+    const ranked = catalog
+      .map(card=>({card,score:tokenScore(text,card)}))
+      .filter(x=>x.score>0)
+      .sort((a,b)=>b.score-a.score)
+      .slice(0,8);
+
+    console.log(`Coincidencias encontradas: ${ranked.length}`);
+    renderResults(ranked, text);
+    setStatus(`✓ Listo.\n\nTexto detectado:\n${text.trim().substring(0,200)}`);
+
+  } catch(e) {
+    console.error("Error en scan:", e);
+    setStatus(`❌ Error:\n${e.message}`);
+  } finally {
+    isScanning = false;
     $("scan").disabled = false;
   }
 }
 
 function confirmCard(card){
   inventory.push({
-    id: card.id || card.culture_invariant_id || "",
+    id: card.id || "",
     name: cardLabel(card),
-    set: card.setName || card.set?.name || "",
+    set: card.setName || "",
     number: card.number || "",
     rarity: card.rarity || "",
     addedAt: new Date().toISOString()
@@ -219,22 +218,23 @@ function updateInventory(){
   $("inventorySummary").textContent = `${inventory.length} cartas registradas en este navegador.`;
 }
 
-$("scan").addEventListener("click",scan);
+$("scan").addEventListener("click", scan);
 $("clear").addEventListener("click",()=>{
-  selectedFile=null;$("photo").value="";$("preview").classList.add("hidden");$("results").innerHTML="";
-  setStatus(catalog.length ? `✓ Catálogo listo: ${catalog.length} cartas.` : "Cargando catálogo…");
+  selectedFile=null; $("photo").value=""; $("preview").classList.add("hidden"); $("results").innerHTML="";
+  setStatus(catalog.length ? `✓ Catálogo: ${catalog.length} cartas.` : "Cargando...");
 });
 $("resetInventory").addEventListener("click",()=>{
-  if(confirm("¿Borrar el inventario local?")){
-    inventory=[];localStorage.removeItem("lorcanaInventoryV1");updateInventory();
+  if(confirm("¿Borrar inventario?")){
+    inventory=[]; localStorage.removeItem("lorcanaInventoryV1"); updateInventory();
   }
 });
 $("export").addEventListener("click",()=>{
   const rows=[["name","set","number","rarity","addedAt"],...inventory.map(x=>[x.name,x.set,x.number,x.rarity,x.addedAt])];
   const csv=rows.map(r=>r.map(v=>`"${String(v??"").replaceAll('"','""')}"`).join(",")).join("\n");
-  const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
-  a.download="lorcana-inventory-v1.csv";a.click();
+  const a=document.createElement("a"); a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv"}));
+  a.download="lorcana-inventory.csv"; a.click();
 });
+
 updateInventory();
 loadCatalog();
 </script>
