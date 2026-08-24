@@ -62,8 +62,11 @@
   </section>
 </main>
 
+<!-- Tesseract.js desde CDN confiable -->
+<script src="https://unpkg.com/tesseract.js-core@v4.0.0/tesseract-core.min.js"></script>
+<script src="https://unpkg.com/tesseract.js@v5.1.0/dist/tesseract.min.js"></script>
+
 <script>
-const OCR_API = "https://api.ocr.space/parse";
 const CATALOG_FILE = "./allCards.json";
 
 let catalog = [];
@@ -192,29 +195,30 @@ async function scan(){
       reader.readAsDataURL(selectedFile);
     });
 
-    setStatus("🔍 Procesando OCR (5-10 segundos)...");
-    setProgress(40);
+    setStatus("🔍 Procesando OCR con Tesseract.js...");
+    setProgress(30);
 
-    const formData = new FormData();
-    formData.append('base64Image', 'data:image/jpeg;base64,' + base64);
-    formData.append('language', 'eng');
-    formData.append('apikey', 'K87899142C');
+    // Usar Tesseract.js correctamente
+    const { data } = await Tesseract.recognize(selectedFile, "eng", {
+      logger: (m) => {
+        if(m.status === "recognizing text") {
+          const progress = Math.min(90, 30 + Math.round((m.progress || 0) * 60));
+          setProgress(progress);
+        }
+      }
+    });
 
-    const response = await fetch(OCR_API, { method: 'POST', body: formData });
-    const result = await response.json();
+    const text = (data.text || "").trim();
+    console.log("Texto OCR:", text);
     
-    setProgress(70);
-    
-    if(result.IsErroredOnProcessing) {
-      console.error("OCR Error:", result.ErrorMessage);
+    if(!text) {
       setProgress(0);
-      setStatus(`❌ Error OCR:\n${result.ErrorMessage}`);
+      setStatus("⚠️ No se detectó texto en la imagen.\nIntenta con una foto más clara.");
       return;
     }
 
-    const text = result.ParsedText || "";
-    console.log("Texto OCR:", text);
     setStatus("🔎 Buscando en catálogo...");
+    setProgress(75);
 
     const ranked = catalog
       .map(card=>({card,score:tokenScore(text,card)}))
@@ -229,7 +233,7 @@ async function scan(){
     setProgress(100);
     setTimeout(() => setProgress(0), 500);
     
-    setStatus(`✓ Listo.\n\nTexto detectado:\n${text.trim().substring(0,200)}`);
+    setStatus(`✓ Listo.\n\nTexto detectado:\n${text.substring(0,250)}`);
 
   } catch(e) {
     setProgress(0);
