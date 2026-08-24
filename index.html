@@ -22,8 +22,8 @@
     .result img{width:100%;aspect-ratio:0.69;object-fit:cover;border-radius:9px;background:#eee}
     .confidence{font-weight:800;margin:7px 0}.green{color:#15803d}.yellow{color:#a16207}.red{color:#b91c1c}
     .small{font-size:12px;color:#6b7280}.hidden{display:none}
-    .warning{background:#fef3c7;border:1px solid #fcd34d;padding:12px;border-radius:8px;margin-bottom:12px}
-    .warning strong{color:#92400e}
+    .progress-bar{width:100%;height:4px;background:#e5e7eb;border-radius:2px;margin-top:8px;overflow:hidden}
+    .progress-fill{height:100%;background:#111827;width:0%;transition:width 0.3s}
   </style>
 </head>
 <body>
@@ -33,20 +33,7 @@
 </header>
 
 <main>
-  <section class="card" id="setupSection">
-    <div class="warning">
-      <strong>⚠️ Primera vez:</strong> Necesitas descargar el catálogo de cartas.
-    </div>
-    <p class="small">Dos opciones para obtener el catálogo:</p>
-    <div class="actions">
-      <button id="downloadBtn">📥 Descargar catálogo (1 clic)</button>
-      <label class="file-label" for="catalogFile">📂 O sube allCards.json</label>
-      <input id="catalogFile" type="file" accept=".json">
-    </div>
-    <div id="setupStatus" class="status">Esperando catálogo...</div>
-  </section>
-
-  <section class="card" id="scannerSection" class="hidden">
+  <section class="card">
     <div class="actions">
       <label class="file-label" for="photo">📷 Tomar / elegir foto</label>
       <input id="photo" type="file" accept="image/*" capture="environment">
@@ -54,7 +41,8 @@
       <button id="clear" class="secondary">Limpiar</button>
     </div>
     <img id="preview" class="hidden" alt="Vista previa">
-    <div id="status" class="status">Listo para escanear.</div>
+    <div id="status" class="status">Cargando catálogo...</div>
+    <div id="progress" class="progress-bar hidden"><div class="progress-fill"></div></div>
   </section>
 
   <section class="card">
@@ -76,8 +64,7 @@
 
 <script>
 const OCR_API = "https://api.ocr.space/parse";
-const CATALOG_CACHE_KEY = "lorcana_catalog_v1";
-const CATALOG_DOWNLOAD_URL = "https://lorcanajson.org/files/current/en/allCards.json";
+const CATALOG_FILE = "./allCards.json";
 
 let catalog = [];
 let selectedFile = null;
@@ -89,89 +76,51 @@ const normalize = s => (s||"").toLowerCase()
   .normalize("NFD").replace(/[\u0300-\u036f]/g,"")
   .replace(/[^a-z0-9\s-]/g," ").replace(/\s+/g," ").trim();
 
-function setStatus(text, elementId = "status") { 
-  $(elementId).textContent = text; 
-}
+function setStatus(text) { $("status").textContent = text; }
 
-function checkCatalog() {
-  const cached = localStorage.getItem(CATALOG_CACHE_KEY);
-  if(cached) {
-    try {
-      catalog = JSON.parse(cached);
-      console.log(`✓ Catálogo cargado desde cache: ${catalog.length} cartas`);
-      showScanner();
-      return true;
-    } catch(e) {
-      console.error("Error parsing cached catalog:", e);
-      return false;
-    }
+function setProgress(percent) {
+  const bar = $("progress");
+  if(percent <= 0) {
+    bar.classList.add("hidden");
+  } else {
+    bar.classList.remove("hidden");
+    bar.querySelector(".progress-fill").style.width = percent + "%";
   }
-  return false;
 }
 
-function showScanner() {
-  $("setupSection").classList.add("hidden");
-  $("scannerSection").classList.remove("hidden");
-  setStatus(catalog.length ? `✓ Catálogo listo: ${catalog.length} cartas.` : "Catálogo vacío");
-}
+async function loadCatalog(){
+  try{
+    console.log("Cargando catálogo desde: " + CATALOG_FILE);
+    setStatus("📥 Cargando catálogo...");
+    setProgress(30);
 
-function hideScannerShowSetup() {
-  $("setupSection").classList.remove("hidden");
-  $("scannerSection").classList.add("hidden");
-}
-
-// Opción 1: Descargar automáticamente
-$("downloadBtn").addEventListener("click", async () => {
-  const btn = $("downloadBtn");
-  btn.disabled = true;
-  setStatus("📥 Descargando catálogo...", "setupStatus");
-  
-  try {
-    const response = await fetch(CATALOG_DOWNLOAD_URL);
-    if(!response.ok) throw new Error(`HTTP ${response.status}`);
+    const response = await fetch(CATALOG_FILE);
+    if(!response.ok) throw new Error(`HTTP ${response.status} - ¿Está allCards.json en el repositorio?`);
+    
+    setProgress(60);
     const data = await response.json();
-    catalog = data.cards || [];
+    catalog = data.cards || data || [];
     
-    localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify(catalog));
-    console.log(`✓ Catálogo descargado: ${catalog.length} cartas`);
-    setStatus(`✓ Catálogo descargado: ${catalog.length} cartas`, "setupStatus");
+    setProgress(90);
     
-    setTimeout(() => showScanner(), 1000);
-  } catch(e) {
-    console.error("Download error:", e);
-    setStatus(`❌ Error descargando:\n${e.message}\n\nIntenta subir el archivo manualmente.`, "setupStatus");
-    btn.disabled = false;
-  }
-});
-
-// Opción 2: Subir archivo manualmente
-$("catalogFile").addEventListener("change", e => {
-  const file = e.target.files[0];
-  if(!file) return;
-  
-  const reader = new FileReader();
-  reader.onload = (event) => {
-    try {
-      const data = JSON.parse(event.target.result);
-      catalog = data.cards || data || [];
-      
-      if(catalog.length === 0) throw new Error("No hay cartas en el JSON");
-      
-      localStorage.setItem(CATALOG_CACHE_KEY, JSON.stringify(catalog));
-      console.log(`✓ Catálogo subido: ${catalog.length} cartas`);
-      setStatus(`✓ Catálogo cargado: ${catalog.length} cartas`, "setupStatus");
-      
-      setTimeout(() => showScanner(), 500);
-    } catch(err) {
-      setStatus(`❌ Error con el archivo JSON:\n${err.message}`, "setupStatus");
+    if(!catalog || catalog.length === 0) {
+      throw new Error("El catálogo no contiene cartas");
     }
-  };
-  reader.onerror = () => setStatus("❌ Error al leer el archivo", "setupStatus");
-  reader.readAsText(file);
-});
+    
+    console.log(`✓ Catálogo cargado: ${catalog.length} cartas`);
+    setProgress(100);
+    setTimeout(() => setProgress(0), 500);
+    
+    setStatus(`✓ Catálogo listo: ${catalog.length} cartas.\n\nSelecciona una foto y toca Escanear.`);
 
-// Photo selection
-$("photo").addEventListener("change", e => {
+  }catch(e){
+    console.error("Error en loadCatalog:", e);
+    setProgress(0);
+    setStatus(`❌ Error al cargar catálogo:\n${e.message}\n\nAsegúrate de que allCards.json está en el repositorio.`);
+  }
+}
+
+$("photo").addEventListener("change", e=>{
   selectedFile = e.target.files[0];
   if(!selectedFile) return;
   $("preview").src = URL.createObjectURL(selectedFile);
@@ -207,7 +156,7 @@ function escapeHtml(s){
 function renderResults(matches, ocrText){
   $("results").innerHTML = "";
   if(!matches.length){
-    $("results").innerHTML = `<div class="small">Sin coincidencias claras.\n\nTexto: ${escapeHtml(ocrText.substring(0,300))}</div>`;
+    $("results").innerHTML = `<div class="small">Sin coincidencias claras.\n\nTexto detectado:\n${escapeHtml(ocrText.substring(0,300))}</div>`;
     return;
   }
   for(const m of matches){
@@ -234,6 +183,7 @@ async function scan(){
   
   try {
     setStatus("📤 Preparando foto...");
+    setProgress(20);
     
     const base64 = await new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -242,7 +192,8 @@ async function scan(){
       reader.readAsDataURL(selectedFile);
     });
 
-    setStatus("🔍 Procesando OCR (5-10 seg)...");
+    setStatus("🔍 Procesando OCR (5-10 segundos)...");
+    setProgress(40);
 
     const formData = new FormData();
     formData.append('base64Image', 'data:image/jpeg;base64,' + base64);
@@ -252,13 +203,17 @@ async function scan(){
     const response = await fetch(OCR_API, { method: 'POST', body: formData });
     const result = await response.json();
     
+    setProgress(70);
+    
     if(result.IsErroredOnProcessing) {
       console.error("OCR Error:", result.ErrorMessage);
+      setProgress(0);
       setStatus(`❌ Error OCR:\n${result.ErrorMessage}`);
       return;
     }
 
     const text = result.ParsedText || "";
+    console.log("Texto OCR:", text);
     setStatus("🔎 Buscando en catálogo...");
 
     const ranked = catalog
@@ -267,11 +222,18 @@ async function scan(){
       .sort((a,b)=>b.score-a.score)
       .slice(0,8);
 
+    setProgress(90);
+    console.log(`Coincidencias encontradas: ${ranked.length}`);
     renderResults(ranked, text);
-    setStatus(`✓ Listo.\n\nTexto: ${text.trim().substring(0,200)}`);
+    
+    setProgress(100);
+    setTimeout(() => setProgress(0), 500);
+    
+    setStatus(`✓ Listo.\n\nTexto detectado:\n${text.trim().substring(0,200)}`);
 
   } catch(e) {
-    console.error("Scan error:", e);
+    setProgress(0);
+    console.error("Error en scan:", e);
     setStatus(`❌ Error:\n${e.message}`);
   } finally {
     isScanning = false;
@@ -299,7 +261,8 @@ function updateInventory(){
 $("scan").addEventListener("click", scan);
 $("clear").addEventListener("click",()=>{
   selectedFile=null; $("photo").value=""; $("preview").classList.add("hidden"); $("results").innerHTML="";
-  setStatus("✓ Listo para escanear.");
+  setProgress(0);
+  setStatus(catalog.length ? `✓ Catálogo: ${catalog.length} cartas.` : "Cargando...");
 });
 $("resetInventory").addEventListener("click",()=>{
   if(confirm("¿Borrar inventario?")){
@@ -314,9 +277,7 @@ $("export").addEventListener("click",()=>{
 });
 
 updateInventory();
-if(!checkCatalog()) {
-  hideScannerShowSetup();
-}
+loadCatalog();
 </script>
 </body>
 </html>
